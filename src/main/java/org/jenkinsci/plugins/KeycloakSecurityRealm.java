@@ -28,20 +28,29 @@ package org.jenkinsci.plugins;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
 import javax.security.cert.X509Certificate;
+import javax.servlet.Filter;
+import javax.servlet.FilterChain;
+import javax.servlet.FilterConfig;
 import javax.servlet.ServletException;
+import javax.servlet.ServletRequest;
+import javax.servlet.ServletResponse;
 import javax.servlet.http.HttpServletRequest;
 
+import hudson.security.ChainedServletFilter;
 import jenkins.security.SecurityListener;
 import org.acegisecurity.Authentication;
 import org.acegisecurity.AuthenticationException;
 import org.acegisecurity.AuthenticationManager;
 import org.acegisecurity.BadCredentialsException;
+import org.acegisecurity.GrantedAuthority;
+import org.acegisecurity.GrantedAuthorityImpl;
 import org.acegisecurity.context.SecurityContextHolder;
 import org.keycloak.KeycloakSecurityContext;
 import org.keycloak.OAuth2Constants;
@@ -54,6 +63,7 @@ import org.keycloak.adapters.ServerRequest.HttpFailure;
 import org.keycloak.adapters.rotation.AdapterTokenVerifier;
 import org.keycloak.adapters.spi.AuthenticationError;
 import org.keycloak.adapters.spi.LogoutError;
+import org.keycloak.common.VerificationException;
 import org.keycloak.common.util.KeycloakUriBuilder;
 import org.keycloak.jose.jws.JWSInput;
 import org.keycloak.representations.AccessToken;
@@ -89,13 +99,15 @@ import net.sf.json.JSONObject;
  * 
  * @author Mohammad Nadeem, devlauer
  */
-public class KeycloakSecurityRealm extends SecurityRealm {
+public class KeycloakSecurityRealm extends SecurityRealm implements Filter {
 
 	private static final String JENKINS_LOGIN_URL = "securityRealm/commenceLogin";
 	/**
 	 * The default URL to finish the login process of this plugin
 	 */
 	public static final String JENKINS_FINISH_LOGIN_URL = "securityRealm/finishLogin";
+
+	public static final String JENKINS_BEARER_LOGIN = "securityRealm/bearerLogin";
 
 	/**
 	 * This constant is used to save the state of an authenticated session. If the
@@ -324,6 +336,56 @@ public class KeycloakSecurityRealm extends SecurityRealm {
 		}
 		req.getSession().setAttribute(AUTH_REQUESTED, Boolean.valueOf(false));
 		super.doLogout(req, rsp);
+	}
+
+	@Override
+	public Filter createFilter(FilterConfig filterConfig) {
+		Filter filter = super.createFilter(filterConfig);
+		return new ChainedServletFilter(filter, this);
+	}
+
+	@Override
+	public void init(FilterConfig filterConfig) throws ServletException {
+
+	}
+
+	@Override
+	public void doFilter(ServletRequest servletRequest, ServletResponse servletResponse, FilterChain filterChain) throws IOException, ServletException {
+		HttpServletRequest req = (HttpServletRequest) servletRequest;
+		String authorizationHeader = req.getHeader("Authorization");
+		if (authorizationHeader != null && authorizationHeader.startsWith("Bearer ")) {
+			LOGGER.log(Level.FINE, "Bearer token found");
+			String bearerToken = authorizationHeader.substring("Bearer ".length());
+			KeycloakDeployment resolvedDeployment = resolveDeployment(getKeycloakDeployment(), req);
+			try {
+				AccessToken accessToken = AdapterTokenVerifier.verifyToken(bearerToken, resolvedDeployment);
+				LOGGER.log(Level.FINE, "Token verified");
+				JWSInput input = new JWSInput(bearerToken);
+				IDToken idToken = input.readJsonContent(IDToken.class);
+				KeycloakAuthentication auth = new KeycloakAuthentication(idToken, accessToken, null /*refreshToken*/, null /*tokenResponse*/);
+
+				KeycloakUserDetails userDetails = new KeycloakUserDetails(idToken.getPreferredUsername(), auth.getAuthorities());
+
+				SecurityListener.fireAuthenticated(userDetails);
+				SecurityContextHolder.getContext().setAuthentication(auth);
+				try {
+					filterChain.doFilter(servletRequest,servletResponse);
+				} finally {
+					SecurityContextHolder.clearContext();
+				}
+
+			} catch (Exception e) {
+				LOGGER.log(Level.SEVERE, "Exception while handling bearer token. Continue without login.", e);
+				filterChain.doFilter(servletRequest,servletResponse);
+			}
+		} else {
+			filterChain.doFilter(servletRequest,servletResponse);
+		}
+	}
+
+	@Override
+	public void destroy() {
+
 	}
 
 	/**
@@ -654,5 +716,4 @@ public class KeycloakSecurityRealm extends SecurityRealm {
 			throw new IllegalStateException("Not yet implemented");
 		}
 	}
-
 }

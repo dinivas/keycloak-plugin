@@ -39,8 +39,12 @@ public class KeycloakAuthentication extends AbstractAuthenticationToken  {
 	public KeycloakAuthentication(IDToken idToken, AccessToken accessToken, String refreshToken, AccessTokenResponse tokenResponse) {
 		super(buildRoles(accessToken));
 		this.userName = idToken.getPreferredUsername();
-		this.setRefreshToken(refreshToken);
-		this.setAccessTokenResponse(tokenResponse);
+		if (refreshToken != null) {
+			this.setRefreshToken(refreshToken);
+		}
+		if (tokenResponse != null) {
+			this.setAccessTokenResponse(tokenResponse);
+		}
 		setAuthenticated(true);
 	}
 
